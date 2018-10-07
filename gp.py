@@ -1,137 +1,173 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+from scipy.stats import multivariate_normal
+from matplotlib.colors import rgb2hex
 
 
-def polynomial(x0):
-	x0_prime = np.array([x0**4, 4.*x0**3, 8.*x0, np.ones(len(x0))]).T
-	y = x0**4 - 4.*x0**3 + 8.*x0 + 1
-	return x0_prime, y
+class BayesianRegression:
+	X = -1
+	phi_X = -1
+	y = -1
+	prior_mu = -1
+	prior_V = -1
+	n_features = -1
+	inv_prior_V = -1
+	inv_prior_V_dot_prior_mu = -1
+	var_error = -1
+	function = -1
+	cmap = cm.get_cmap('Set2')
 
-def linear(x0):
-	x0_prime = np.array([x0, np.ones(len(x0))]).T
-	y = x0 + 1
-	return x0_prime, y
+	def __init__(self, var_error, prior_mu, prior_V, function=lambda x: np.array([[1, xx] for xx in x])):
+		self.var_error = var_error
+		self.prior_mu = prior_mu
+		self.prior_V = prior_V
+		self.n_features = len(prior_mu)
+		self.inv_prior_V = np.linalg.pinv(prior_V)
+		self.inv_prior_V_dot_prior_mu =  np.dot(self.inv_prior_V, self.prior_mu)
+		self.function = function
 
-def parameter_posterior(sigma, prior_mu, prior_V, x0, y0):
-	inv_prior_V = np.linalg.pinv(prior_V)
+	def add_observations(self, x, y):
+		x, y = np.array(x), np.array(y)
+		if isinstance(self.X, int):
+			self.X = x
+			self.phi_X = np.array(self.function(x))
+			self.y = np.array(y)
+		else:
+			self.X = np.hstack((self.X, x))
+			self.phi_X = np.vstack((self.phi_X, self.function(x)))
+			self.y = np.hstack((self.y, y))
 
-	# Parameter Gaussian posterior mean and covariance matrix
-	XTX = np.dot(x0.T, x0)
-	V_N = sigma**2 * np.linalg.pinv(sigma**2 * inv_prior_V + XTX)
-	mu_N = np.dot(V_N, np.dot(inv_prior_V, prior_mu)) + 1. / sigma**2 * np.dot(V_N, np.dot(x0.T, y0))
+		# Parameter Gaussian posterior mean and covariance matrix
+		XTX = np.dot(self.phi_X.T, self.phi_X)
+		self.V_N = self.var_error**2 * np.linalg.pinv(self.var_error**2 * self.inv_prior_V + XTX)
+		self.mu_N = np.dot(self.V_N, self.inv_prior_V_dot_prior_mu) + 1. / self.var_error**2 * np.dot(self.V_N, np.dot(self.phi_X.T, self.y))
 
-	return mu_N, V_N
+		return self.V_N, self.mu_N
 
-def fit_and_sample_models(sigma, prior_mu, prior_V, x0, y0, n_samples):
-	n_features = len(x0[0])
+	def sample_models_parameter_posterior(self, n_samples):
+		# Sample from bivariate standard normal
+		std_normal_samples = np.random.multivariate_normal(np.zeros(self.n_features), np.eye(self.n_features, dtype=float), (n_samples, self.n_features))[:, :, 0]
 
-	# Parameter Gaussian posterior mean and covariance matrix
-	mu_N, V_N = parameter_posterior(sigma, prior_mu, prior_V, x0, y0)
+		# Standard deviation matrix from covariance matrix
+		sqrt_V_N = np.linalg.cholesky(self.V_N)
 
-	# Sample from bivariate standard normal
-	std_normal_samples = np.random.multivariate_normal(np.zeros(n_features), np.eye(n_features, dtype=float), (n_samples, n_features))[:, :, 0]
+		# Apply covariance structure to samples from standard normal
+		theta_samples = self.mu_N + np.dot(std_normal_samples, sqrt_V_N)
 
-	# Standard deviation matrix from covariance matrix
-	sqrt_V_N = np.linalg.cholesky(V_N)
+		return theta_samples
 
-	# Apply covariance structure to samples from standard normal
-	theta_samples = mu_N + np.dot(std_normal_samples, sqrt_V_N)
+	def predictive_posterior(self, x_star):
+		n = len(x_star)
+		x_star_mod = self.function(x_star)
 
-	return theta_samples
+		mu_star = np.dot(self.mu_N, x_star_mod.T)
+		sigma_star = np.ones(len(x_star))
 
-def predictive_posterior(x_star, mu_N, V_N, sigma, function):
-	n = len(x_star)
-	x_star_mod, _ = function(x_star)
+		for i in range(len(x_star)):
+			sigma_star_no_noise = np.dot(x_star_mod[i], np.dot(self.V_N, x_star_mod[i].T))
+			sigma_star[i] = self.var_error + sigma_star_no_noise
 
-	mu_star = np.dot(mu_N, x_star_mod.T)
-	sigma_star = np.ones(len(x_star))
+		return mu_star, sigma_star
 
-	for i in range(len(x_star)):
-		sigma_star_no_noise = np.dot(x_star_mod[i], np.dot(V_N, x_star_mod[i].T))
-		sigma_star[i] = sigma + sigma_star_no_noise
+	def plot_sample_models_1d(self, ax, n_samples, c_model=cmap(0), c_data=cmap(1), alpha=0.4):
+		x_star = np.arange(min(self.X) - np.ptp(self.X) * 0.1, max(self.X) + np.ptp(self.X) * 0.1, 1e-2 * np.ptp(self.X))
+		theta_samples = self.sample_models_parameter_posterior(n_samples)
+		for s in theta_samples:
+			ax.plot(x_star, np.dot(self.function(x_star), s), c=c_model, alpha=alpha)
 
-	return mu_star, sigma_star
+		ax.scatter(self.X, self.y, c=rgb2hex(c_data), s=8)
 
-def fit_and_plot_sample_models(x_star, function, sigma, prior_mu, prior_V, x0_prime, x0, y0, N, n_model_samples, c_model, c_dots, p_size, y_range, bounds):
-	# Generate new polynomial features (x1, x2, ...)
-	x_star_prime, _ = function(x_star)
+	def plot_predictive_model(self, ax, c_model=cmap(0), c_data=cmap(1), alpha=0.6):
+		x_star = np.arange(min(self.X) - np.ptp(self.X) * 0.1, max(self.X) + np.ptp(self.X) * 0.1, 1e-2 * np.ptp(self.X))
+		phi_x_star = self.function(x_star)
 
-	# Plot sample models
-	plt.figure(1)
-	fig1, axes = plt.subplots(2, 2, sharex=True, sharey=True)
-	for ax, n in zip(axes.ravel(), N):
-		# Fit and sample parameters for univariate linear models.
-		theta_samples = fit_and_sample_models(sigma, prior_mu, prior_V, x0_prime[:n], y0[:n], n_model_samples)
-
-		# Estimate y for each sampled model for each sample x (sample with added function features)
-		Y = np.dot(theta_samples, x_star_prime.T)
-
-		# Plot models
-		for y in Y:
-			ax.plot(x_star, y, c=c_model, alpha=0.3)
-
-		# Plot dataset
-		ax.scatter(x0[:n], y0[:n], c=c_dots[:3], s=p_size)
-
-		ax.set_ylim(y_range)
-		ax.set_xlim(bounds)
-		ax.set_title('N = {}'.format(n))
-		ax.get_xaxis().set_visible(False)
-		ax.get_yaxis().set_visible(False)
-
-def fit_and_plot_posterior_predictive(x_star, function, sigma, prior_mu, prior_V, x0_prime, x0, y0, c_model, c_dots, p_size, y_range, bounds):
-	# Plot posterior predictive
-	plt.figure(2)
-	fig1, axes = plt.subplots(2, 2, sharex=True, sharey=True)
-	for ax, n in zip(axes.ravel(), N):
-		mu_N, V_N = parameter_posterior(sigma, prior_mu, prior_V, x0_prime[:n], y0[:n])
-
-		y_star, sigma_star = predictive_posterior(x_star, mu_N, V_N, sigma, function)
+		y_star, sigma_star = self.predictive_posterior(x_star)
 
 		ax.plot(x_star, y_star, c=c_model)
-		ax.plot(x_star, y_star + sigma_star, c=c_model, alpha=0.2)
-		ax.plot(x_star, y_star - sigma_star, c=c_model, alpha=0.2)
-		ax.fill_between(x_star, y_star + sigma_star, y_star - sigma_star, facecolor=c_model, alpha=0.1)
+		ax.plot(x_star, y_star + sigma_star, c=c_model, alpha=0.4)
+		ax.plot(x_star, y_star - sigma_star, c=c_model, alpha=0.4)
+		ax.fill_between(x_star, y_star + sigma_star, y_star - sigma_star, facecolor=c_model, alpha=0.2)
 
-		ax.scatter(x0[:n], y0[:n], c=c_dots[:3], s=p_size)
+		ax.scatter(self.X, self.y, c=rgb2hex(c_data), s=8)
 
-		ax.set_ylim(y_range)
-		ax.set_xlim(bounds)
-		ax.set_title('N = {}'.format(n))
-		ax.get_xaxis().set_visible(False)
-		ax.get_yaxis().set_visible(False)
+	def plot_parameter_distributions(self, cmap=cm.get_cmap('magma'), savefig=''):
+		fig, axes = plt.subplots(self.n_features, self.n_features)
+		for i in range(self.n_features):
+			for j in range(self.n_features):
+				if i != j:
+					xlim = [self.mu_N[i] + 15. * self.V_N[i, i], self.mu_N[i] - 15. * self.V_N[i, i]]
+					ylim = [self.mu_N[j] + 15. * self.V_N[j, j], self.mu_N[j] - 15. * self.V_N[j, j]]
+					beta1, beta2 = np.mgrid[xlim[0]:xlim[1]:(xlim[1] - xlim[0]) / 100, ylim[0]:ylim[1]:(ylim[1] - ylim[0]) / 100]
+					pos = np.empty(beta1.shape + (2,))
+					pos[:, :, 0] = beta1; pos[:, :, 1] = beta2
+
+					# Create multivariate normal from model's mean vector and covariance matrix.
+					rows_cols = np.array([i, j])
+					rv = multivariate_normal(self.mu_N[[i, j]], self.V_N[rows_cols[:, None], rows_cols])
+					z = rv.pdf(pos)
+					axes[i, j].contourf(beta1, beta2, z, 50, cmap=cmap)
+					axes[i, j].get_xaxis().set_visible(False)
+					axes[i, j].get_yaxis().set_visible(False)
+
+		if len(savefig) > 0:
+			plt.savefig(savefig)
+		else:
+			plt.show()
+
+def run_bayesian_regression_experiment():
+	# Two models
+	function_linear = lambda x: np.array([[1, xx] for xx in x])
+	function_polynomial = lambda x: np.array([[xx**4, 4.*xx**3, 8.*xx, 1] for xx in x])
+
+	n_features = 4
+	function = function_polynomial
+
+	# Create priors
+	prior_V = np.eye(n_features, dtype=float)
+	prior_mu = np.zeros(n_features)
+
+	# Create dataset
+	N = [3, 5, 15, 50]
+	bounds = [-4., 2.]
+	var_error = 2.5
+
+	# Generate random data set
+	x0 = np.random.uniform(bounds[0], bounds[1], N[-1])
+	y0 = np.sum(function(x0), axis=1)
+	y0 += np.random.normal(0, var_error, N[-1])
+
+	# Create regression object
+	regression = BayesianRegression(var_error, prior_mu, prior_V, function=function_polynomial)
+
+	# Add data to regression model in stages and sample model from parameter posterior
+	fig, axes = plt.subplots(2, 2, sharex=True, sharey=True)
+	n_previous = 0
+	for ax, n in zip(axes.ravel(), N):
+		regression.add_observations(x0[n_previous:n], y0[n_previous:n])
+		n_previous = n
+		regression.plot_sample_models_1d(ax, 5)
+		ax.set_title('N={}'.format(n))
+
+	# Create new regression object
+	regression = BayesianRegression(var_error, prior_mu, prior_V, function=function_polynomial)
+
+	# Add data to regression model in stages and plot model mean and error variance
+	plt.figure(1)
+	fig, axes = plt.subplots(2, 2, sharex=True, sharey=True)
+	n_previous = 0
+	for ax, n in zip(axes.ravel(), N):
+		regression.add_observations(x0[n_previous:n], y0[n_previous:n])
+		n_previous = n
+		regression.plot_predictive_model(ax)
+		ax.set_title('N={}'.format(n))
+
+	plt.show()
+
+	# plot parameter distirbution after all data is added
+	regression.plot_parameter_distributions()
 
 
-# Create priors
-n_features = 2
-function = linear
-prior_V = np.eye(n_features, dtype=float)
-prior_mu = np.zeros(n_features)
+run_bayesian_regression_experiment()
+# run_gaussian_processes_experiment()
 
-# Create dataset
-N = [2, 4, 10, 50]
-bounds = [-1.3, 3.3]
-sigma = 0.5
-
-x0 = np.random.uniform(bounds[0], bounds[1], N[-1])
-x0_prime, y0 = function(x0)
-y0 += np.random.normal(0, sigma, N[-1])
-
-# Sample 100 points at regulat intervals
-x_star = np.arange(bounds[0], bounds[1], 0.01 * (bounds[1] - bounds[0]))
-
-# Set plot parameters
-
-cmap = cm.get_cmap('Set2')
-c_model = cmap(0)
-c_dots = cmap(1)
-
-p_size = 8.
-y_range = [-2, 6]
-n_model_samples = 5
-
-fit_and_plot_sample_models(x_star, function, sigma, prior_mu, prior_V, x0_prime, x0, y0, N, n_model_samples, c_model, c_dots, p_size, y_range, bounds)
-fit_and_plot_posterior_predictive(x_star, function, sigma, prior_mu, prior_V, x0_prime, x0, y0, c_model, c_dots, p_size, y_range, bounds)
-
-plt.show()
